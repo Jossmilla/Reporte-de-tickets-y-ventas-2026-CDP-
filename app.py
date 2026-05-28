@@ -6,15 +6,10 @@ import io
 st.set_page_config(page_title="Reportes Axalta", page_icon="📊", layout="centered")
 
 st.title("📊 Generador de Reportes - Axalta")
-st.write("Sube los archivos CSV para generar tu reporte gerencial en PDF.")
+st.write("Sube **UN SOLO ARCHIVO** de Excel o CSV con tu base de datos histórica. El sistema detectará automáticamente los meses y calculará todo.")
 
-col1, col2 = st.columns(2)
-with col1:
-    tc_file = st.file_uploader("1. Tipos de Cambio (TC.csv)", type=['csv'])
-    actual_file = st.file_uploader("2. Ventas Mes Actual (CSV)", type=['csv'])
-with col2:
-    marzo_file = st.file_uploader("3. Histórico Mes -2 (Ej. Marzo)", type=['csv'])
-    abril_file = st.file_uploader("4. Histórico Mes -1 (Ej. Abril)", type=['csv'])
+# UNA SOLA CAJITA DE SUBIDA
+uploaded_file = st.file_uploader("Sube aquí tu Base de Datos cruda", type=['csv', 'xlsx'])
 
 def calc_growth(current, previous):
     if previous > 0: return ((current - previous) / previous) * 100
@@ -29,45 +24,69 @@ def format_growth(val):
     return f"<span style='color: {color}; font-weight: bold;'>{sign}{val:,.2f}%</span>"
 
 if st.button("🚀 Generar Reporte PDF", type="primary"):
-    if tc_file and actual_file and marzo_file and abril_file:
+    if uploaded_file:
         try:
-            with st.spinner('Calculando crecimientos y generando PDF...'):
-                # 1. Tipos de Cambio
-                df_tc = pd.read_csv(tc_file, skiprows=3).iloc[:, :2]
-                df_tc.columns = ['PAÍS', 'TC USD']
-                df_tc = df_tc.dropna(subset=['PAÍS'])
-                df_tc['TC USD'] = pd.to_numeric(df_tc['TC USD'], errors='coerce')
+            with st.spinner('Analizando fechas, calculando crecimientos y generando PDF...'):
+                
+                # 1. Leer el archivo (sea CSV o Excel)
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
+                
+                # 2. Limpiar montos y hacer conversión a Dólares
+                df['MONTO TICKET'] = pd.to_numeric(df['MONTO TICKET'].astype(str).str.replace(',', ''), errors='coerce')
+                
+                # Tipos de Cambio en memoria
+                tc_dict = {
+                    'GUATEMALA': 7.68,
+                    'EL SALVADOR': 1.0,
+                    'HONDURAS': 26.5,
+                    'NICARAGUA': 36.84,
+                    'COSTA RICA': 471.85,
+                    'PANAMÁ': 1.0
+                }
+                df['TC USD'] = df['PAÍS'].map(tc_dict).fillna(1.0)
+                df['TOTAL USD'] = df['MONTO TICKET'] / df['TC USD']
 
-                # 2. Mes Actual
-                df_actual = pd.read_csv(actual_file)
-                df_actual['MONTO TICKET'] = pd.to_numeric(df_actual['MONTO TICKET'].astype(str).str.replace(',', ''), errors='coerce')
-                df_actual = df_actual.merge(df_tc, how='left', on='PAÍS')
-                df_actual['TC USD'] = df_actual['TC USD'].fillna(1.0)
-                df_actual['TOTAL USD'] = df_actual['MONTO TICKET'] / df_actual['TC USD']
+                # 3. Magia con las Fechas (Detectar meses automáticamente)
+                df['FECHA REGISTRO'] = pd.to_datetime(df['FECHA REGISTRO'], errors='coerce')
+                df = df.dropna(subset=['FECHA REGISTRO'])
+                df['Mes_Año'] = df['FECHA REGISTRO'].dt.to_period('M')
+                
+                meses_ordenados = sorted(df['Mes_Año'].unique())
+                mes_actual = meses_ordenados[-1] # El mes más reciente
+                mes_1 = meses_ordenados[-2] if len(meses_ordenados) >= 2 else None # Mes anterior
+                mes_2 = meses_ordenados[-3] if len(meses_ordenados) >= 3 else None # Hace dos meses
+                
+                # 4. Separar la data por meses
+                df_actual = df[df['Mes_Año'] == mes_actual]
+                df_m1 = df[df['Mes_Año'] == mes_1] if mes_1 else pd.DataFrame(columns=df.columns)
+                df_m2 = df[df['Mes_Año'] == mes_2] if mes_2 else pd.DataFrame(columns=df.columns)
 
+                # Agrupar
                 actual_pais = df_actual.groupby('PAÍS').agg(Tickets_May=('NÚMERO DE TICKET', 'count'), Monto_USD_May=('TOTAL USD', 'sum')).reset_index()
                 actual_dist = df_actual.groupby(['PAÍS', 'RAZÓN SOCIAL']).agg(Tickets=('NÚMERO DE TICKET', 'count'), Monto_USD=('TOTAL USD', 'sum')).reset_index().sort_values(['PAÍS', 'Monto_USD'], ascending=[True, False])
-
-                # 3. Históricos
-                df_marzo = pd.read_csv(marzo_file)
-                df_abril = pd.read_csv(abril_file)
-                for df in [df_marzo, df_abril]:
-                    df['TOTAL USD'] = pd.to_numeric(df['TOTAL USD'].astype(str).str.replace(',', ''), errors='coerce')
                 
-                marzo_pais = df_marzo.groupby('PAÍS').agg(Tickets_Mar=('NÚMERO DE TICKET', 'count'), Monto_USD_Mar=('TOTAL USD', 'sum')).reset_index()
-                abril_pais = df_abril.groupby('PAÍS').agg(Tickets_Apr=('NÚMERO DE TICKET', 'count'), Monto_USD_Apr=('TOTAL USD', 'sum')).reset_index()
+                m1_pais = df_m1.groupby('PAÍS').agg(Tickets_Apr=('NÚMERO DE TICKET', 'count'), Monto_USD_Apr=('TOTAL USD', 'sum')).reset_index()
+                m2_pais = df_m2.groupby('PAÍS').agg(Tickets_Mar=('NÚMERO DE TICKET', 'count'), Monto_USD_Mar=('TOTAL USD', 'sum')).reset_index()
 
-                # 4. Combinar
-                history = marzo_pais.merge(abril_pais, on='PAÍS', how='outer').merge(actual_pais, on='PAÍS', how='outer').fillna(0)
+                # Combinar Histórico
+                history = m2_pais.merge(m1_pais, on='PAÍS', how='outer').merge(actual_pais, on='PAÍS', how='outer').fillna(0)
                 history['Crecimiento_Abr_vs_Mar'] = history.apply(lambda row: calc_growth(row['Monto_USD_Apr'], row['Monto_USD_Mar']), axis=1)
                 history['Crecimiento_May_vs_Abr'] = history.apply(lambda row: calc_growth(row['Monto_USD_May'], row['Monto_USD_Apr']), axis=1)
                 history = history.sort_values('PAÍS')
 
                 total_tickets_may = df_actual['NÚMERO DE TICKET'].count()
                 total_usd_may = df_actual['TOTAL USD'].sum()
-                growth_apr_may = calc_growth(total_usd_may, df_abril['TOTAL USD'].sum())
+                growth_apr_may = calc_growth(total_usd_may, df_m1['TOTAL USD'].sum() if mes_1 else 0)
 
-                # 5. Generar HTML
+                # Nombres de meses dinámicos para los títulos
+                n_actual = mes_actual.strftime('%b').capitalize() if mes_actual else "Actual"
+                n_m1 = mes_1.strftime('%b').capitalize() if mes_1 else "Mes -1"
+                n_m2 = mes_2.strftime('%b').capitalize() if mes_2 else "Mes -2"
+
+                # 5. Construir HTML
                 css = """
                 @page { size: A4 landscape; margin: 15mm 20mm; background-color: #faf8f5; 
                 @bottom-right { content: "Página " counter(page) " de " counter(pages); font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 8pt; color: #888; } }
@@ -91,6 +110,7 @@ if st.button("🚀 Generar Reporte PDF", type="primary"):
                 tr:nth-child(even) { background-color: #fafafa; }
                 .text-right { text-align: right; white-space: nowrap; }
                 .total-row { font-weight: bold; background-color: #ffe0b2 !important; border-top: 2px solid #ff9800; }
+                .footer { display: none; }
                 """
                 
                 html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><style>{css}</style></head>
@@ -98,12 +118,17 @@ if st.button("🚀 Generar Reporte PDF", type="primary"):
                 <table class="header-table"><tr><td class="header-left"><h1>Reporte de Ventas y Tickets</h1></td>
                 <td class="header-right"><div class="logo">AXALTA</div></td></tr></table>
                 <table class="kpi-table"><tr>
-                <td class="kpi-card"><div class="kpi-value">{format_curr(total_usd_may)}</div><div class="kpi-label">Ventas Totales Actuales (USD)</div></td>
-                <td class="kpi-card"><div class="kpi-value">{format_num(total_tickets_may)}</div><div class="kpi-label">Tickets Registrados Actuales</div></td>
-                <td class="kpi-card"><div class="kpi-value">{format_growth(growth_apr_may)}</div><div class="kpi-label">Crecimiento vs Mes Anterior</div></td>
+                <td class="kpi-card"><div class="kpi-value">{format_curr(total_usd_may)}</div><div class="kpi-label">Ventas Totales {n_actual} (USD)</div></td>
+                <td class="kpi-card"><div class="kpi-value">{format_num(total_tickets_may)}</div><div class="kpi-label">Tickets Registrados {n_actual}</div></td>
+                <td class="kpi-card"><div class="kpi-value">{format_growth(growth_apr_may)}</div><div class="kpi-label">Crecimiento vs {n_m1}</div></td>
                 </tr></table>
-                <h2>1. Histórico de Crecimiento</h2>
-                <table><thead><tr><th>País</th><th class="text-right">Tickets<br>Mes -2</th><th class="text-right">Ventas Mes -2<br>(USD)</th><th class="text-right">Tickets<br>Mes -1</th><th class="text-right">Ventas Mes -1<br>(USD)</th><th class="text-right">Crecimiento<br>Mes -1</th><th class="text-right">Tickets<br>Actual</th><th class="text-right">Ventas Actual<br>(USD)</th><th class="text-right">Crecimiento<br>Actual</th></tr></thead><tbody>"""
+                
+                <h2>1. Histórico de Crecimiento ({n_m2} - {n_actual})</h2>
+                <table><thead><tr><th>País</th>
+                <th class="text-right">Tickets<br>{n_m2}</th><th class="text-right">Ventas {n_m2}<br>(USD)</th>
+                <th class="text-right">Tickets<br>{n_m1}</th><th class="text-right">Ventas {n_m1}<br>(USD)</th><th class="text-right">Crecimiento<br>vs {n_m2}</th>
+                <th class="text-right">Tickets<br>{n_actual}</th><th class="text-right">Ventas {n_actual}<br>(USD)</th><th class="text-right">Crecimiento<br>vs {n_m1}</th>
+                </tr></thead><tbody>"""
                 
                 t_t_mar = t_u_mar = t_t_abr = t_u_abr = t_t_may = t_u_may = 0
                 for _, row in history.iterrows():
@@ -114,7 +139,7 @@ if st.button("🚀 Generar Reporte PDF", type="primary"):
                 
                 html += f"<tr class='total-row'><td><strong>TOTAL GENERAL</strong></td><td class='text-right'>{format_num(t_t_mar)}</td><td class='text-right'>{format_curr(t_u_mar)}</td><td class='text-right'>{format_num(t_t_abr)}</td><td class='text-right'>{format_curr(t_u_abr)}</td><td class='text-right'>{format_growth(calc_growth(t_u_abr, t_u_mar))}</td><td class='text-right'>{format_num(t_t_may)}</td><td class='text-right'>{format_curr(t_u_may)}</td><td class='text-right'>{format_growth(calc_growth(t_u_may, t_u_abr))}</td></tr></tbody></table>"
                 
-                html += "<h2>2. Desempeño por País y Distribuidor (Mes Actual)</h2><table><thead><tr><th>País</th><th>Razón Social (Distribuidor)</th><th class='text-right'>Tickets</th><th class='text-right'>Ventas (USD)</th></tr></thead><tbody>"
+                html += f"<h2>2. Desempeño por País y Distribuidor ({n_actual})</h2><table><thead><tr><th>País</th><th>Razón Social (Distribuidor)</th><th class='text-right'>Tickets</th><th class='text-right'>Ventas (USD)</th></tr></thead><tbody>"
                 curr_pais = ""
                 for _, row in actual_dist.iterrows():
                     p_disp = row['PAÍS'] if row['PAÍS'] != curr_pais else ""
@@ -123,7 +148,7 @@ if st.button("🚀 Generar Reporte PDF", type="primary"):
                 
                 html += "</tbody></table></div></body></html>"
 
-                # 6. Crear PDF en memoria
+                # 6. Generar el PDF final
                 pdf_buffer = io.BytesIO()
                 HTML(string=html).write_pdf(pdf_buffer)
                 
@@ -131,6 +156,6 @@ if st.button("🚀 Generar Reporte PDF", type="primary"):
                 st.download_button(label="📄 Descargar Reporte PDF", data=pdf_buffer.getvalue(), file_name="Reporte_Gerencial_Axalta.pdf", mime="application/pdf")
 
         except Exception as e:
-            st.error(f"Error al procesar: {e}. Revisa que los archivos tengan el formato correcto.")
+            st.error(f"Hubo un error analizando el archivo. Asegúrate de subir la base de datos cruda correcta. Detalles: {e}")
     else:
-        st.warning("Falta subir uno o más archivos.")
+        st.warning("Por favor, sube un archivo para generar el reporte.")
