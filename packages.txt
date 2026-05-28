@@ -1,0 +1,3 @@
+pango1.0-tools
+libglib2.0-dev
+libfontconfig1-dev
